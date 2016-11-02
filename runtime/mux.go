@@ -15,6 +15,11 @@ type HandlerFunc func(w http.ResponseWriter, r *http.Request, pathParams map[str
 // ServeMux is a request multiplexer for grpc-gateway.
 // It matches http requests to patterns and invokes the corresponding handler.
 type ServeMux struct {
+	BadRequestHandler       func(http.ResponseWriter, *http.Request)
+	NotFoundHandler         func(http.ResponseWriter, *http.Request)
+	MethodNotAllowedHandler func(http.ResponseWriter, *http.Request)
+	PanicHandler            func(http.ResponseWriter, *http.Request, error)
+
 	// handlers maps HTTP method to a list of handlers.
 	handlers               map[string][]handler
 	forwardResponseOptions []func(context.Context, http.ResponseWriter, proto.Message) error
@@ -39,6 +44,18 @@ func WithForwardResponseOption(forwardResponseOption func(context.Context, http.
 // NewServeMux returns a new ServeMux whose internal mapping is empty.
 func NewServeMux(opts ...ServeMuxOption) *ServeMux {
 	serveMux := &ServeMux{
+		BadRequestHandler: func(w http.ResponseWriter, r *http.Request) {
+			OtherErrorHandler(w, r, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		},
+		NotFoundHandler: func(w http.ResponseWriter, r *http.Request) {
+			OtherErrorHandler(w, r, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		},
+		MethodNotAllowedHandler: func(w http.ResponseWriter, r *http.Request) {
+			OtherErrorHandler(w, r, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		},
+		PanicHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			OtherErrorHandler(w, r, err.Error(), http.StatusBadRequest)
+		},
 		handlers:               make(map[string][]handler),
 		forwardResponseOptions: make([]func(context.Context, http.ResponseWriter, proto.Message) error, 0),
 		marshalers:             makeMarshalerMIMERegistry(),
@@ -59,7 +76,7 @@ func (s *ServeMux) Handle(meth string, pat Pattern, h HandlerFunc) {
 func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	if !strings.HasPrefix(path, "/") {
-		OtherErrorHandler(w, r, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		s.BadRequestHandler(w, r)
 		return
 	}
 
@@ -67,7 +84,7 @@ func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	l := len(components)
 	var verb string
 	if idx := strings.LastIndex(components[l-1], ":"); idx == 0 {
-		OtherErrorHandler(w, r, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		s.NotFoundHandler(w, r)
 		return
 	} else if idx > 0 {
 		c := components[l-1]
@@ -77,7 +94,7 @@ func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if override := r.Header.Get("X-HTTP-Method-Override"); override != "" && isPathLengthFallback(r) {
 		r.Method = strings.ToUpper(override)
 		if err := r.ParseForm(); err != nil {
-			OtherErrorHandler(w, r, err.Error(), http.StatusBadRequest)
+			s.PanicHandler(w, r, err)
 			return
 		}
 	}
@@ -104,17 +121,18 @@ func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// X-HTTP-Method-Override is optional. Always allow fallback to POST.
 			if isPathLengthFallback(r) {
 				if err := r.ParseForm(); err != nil {
-					OtherErrorHandler(w, r, err.Error(), http.StatusBadRequest)
+					s.PanicHandler(w, r, err)
 					return
 				}
 				h.h(w, r, pathParams)
 				return
 			}
-			OtherErrorHandler(w, r, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+			s.MethodNotAllowedHandler(w, r)
 			return
 		}
 	}
-	OtherErrorHandler(w, r, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+
+	s.NotFoundHandler(w, r)
 }
 
 // GetForwardResponseOptions returns the ForwardResponseOptions associated with this ServeMux.
